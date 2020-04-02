@@ -31,9 +31,9 @@ func (l Limiter) Allow() bool {
 
 // NewLimiterStore returns a LimiterStore using the received backend for persistence
 func NewLimiterStore(maxRate float64, capacity int64, backend krakendrate.Backend) krakendrate.LimiterStore {
-	f := func() interface{} { return NewLimiter(maxRate, capacity) }
+	f := func() krakendrate.Limiter { return NewLimiter(maxRate, capacity) }
 	return func(t string) krakendrate.Limiter {
-		return backend.Load(t, f).(Limiter)
+		return backend.Load(t, f)
 	}
 }
 

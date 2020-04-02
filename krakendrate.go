@@ -32,8 +32,12 @@ type Hasher func(string) uint64
 
 // Backend is the interface of the persistence layer
 type Backend interface {
-	Load(string, func() interface{}) interface{}
-	Store(string, interface{}) error
+	Load(string, func() Limiter) Limiter
+	Store(string, Limiter) error
+}
+
+type MemoryBackendEvictionRegister interface {
+	Register(*MemoryBackend)
 }
 
 // ShardedMemoryBackend is a memory backend shardering the data in order to avoid mutex contention
@@ -55,10 +59,12 @@ func NewShardedMemoryBackend(ctx context.Context, shards uint64, ttl time.Durati
 		total:  shards,
 		hasher: h,
 	}
+	e := newMemoryBackendEvictioner(ctx, ttl)
 	var i uint64
 	for i = 0; i < shards; i++ {
-		b.shards[i] = NewMemoryBackend(ctx, ttl)
+		b.shards[i] = NewMemoryBackend(ctx, ttl, e)
 	}
+
 	return b
 }
 
@@ -67,12 +73,12 @@ func (b *ShardedMemoryBackend) shard(key string) uint64 {
 }
 
 // Load implements the Backend interface
-func (b *ShardedMemoryBackend) Load(key string, f func() interface{}) interface{} {
+func (b *ShardedMemoryBackend) Load(key string, f func() Limiter) Limiter {
 	return b.shards[b.shard(key)].Load(key, f)
 }
 
 // Store implements the Backend interface
-func (b *ShardedMemoryBackend) Store(key string, v interface{}) error {
+func (b *ShardedMemoryBackend) Store(key string, v Limiter) error {
 	return b.shards[b.shard(key)].Store(key, v)
 }
 
@@ -94,21 +100,25 @@ func (b *ShardedMemoryBackend) del(key ...string) {
 	}
 }
 
-func NewMemoryBackend(ctx context.Context, ttl time.Duration) *MemoryBackend {
+func NewMemoryBackend(ctx context.Context, ttl time.Duration, e MemoryBackendEvictionRegister) *MemoryBackend {
 	m := &MemoryBackend{
-		data:       map[string]interface{}{},
+		data:       map[string]Limiter{},
 		lastAccess: map[string]time.Time{},
 		mu:         new(sync.RWMutex),
 	}
 
-	go m.manageEvictions(ctx, ttl)
+	if e == nil {
+		go m.manageEvictions(ctx, ttl)
+	} else {
+		e.Register(m)
+	}
 
 	return m
 }
 
 // MemoryBackend implements the backend interface by wrapping a sync.Map
 type MemoryBackend struct {
-	data       map[string]interface{}
+	data       map[string]Limiter
 	lastAccess map[string]time.Time
 	mu         *sync.RWMutex
 }
@@ -137,7 +147,7 @@ func (m *MemoryBackend) manageEvictions(ctx context.Context, ttl time.Duration) 
 }
 
 // Load implements the Backend interface
-func (m *MemoryBackend) Load(key string, f func() interface{}) interface{} {
+func (m *MemoryBackend) Load(key string, f func() Limiter) Limiter {
 	m.mu.RLock()
 	v, ok := m.data[key]
 	m.mu.RUnlock()
@@ -172,7 +182,7 @@ func (m *MemoryBackend) Load(key string, f func() interface{}) interface{} {
 }
 
 // Store implements the Backend interface
-func (m *MemoryBackend) Store(key string, v interface{}) error {
+func (m *MemoryBackend) Store(key string, v Limiter) error {
 	m.mu.Lock()
 	m.lastAccess[key] = now()
 	m.data[key] = v
@@ -187,4 +197,53 @@ func (m *MemoryBackend) del(key ...string) {
 		delete(m.lastAccess, k)
 	}
 	m.mu.Unlock()
+}
+
+func newMemoryBackendEvictioner(ctx context.Context, ttl time.Duration) *memoryBackendEvictioner {
+	e := &memoryBackendEvictioner{
+		backends: []*MemoryBackend{},
+		mu:       &sync.RWMutex{},
+	}
+
+	go e.manageEvictions(ctx, ttl)
+
+	return e
+}
+
+type memoryBackendEvictioner struct {
+	backends []*MemoryBackend
+	mu       *sync.RWMutex
+}
+
+func (m *memoryBackendEvictioner) Register(b *MemoryBackend) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.backends = append(m.backends, b)
+}
+
+func (m *memoryBackendEvictioner) manageEvictions(ctx context.Context, ttl time.Duration) {
+	t := time.NewTicker(ttl)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			for _, b := range m.backends {
+				keysToDel := []string{}
+				b.mu.RLock()
+				for k, v := range b.lastAccess {
+					if v.Add(ttl).Before(now) {
+						keysToDel = append(keysToDel, k)
+					}
+				}
+				b.mu.RUnlock()
+
+				if len(keysToDel) == 0 {
+					continue
+				}
+
+				go b.del(keysToDel...)
+			}
+		}
+	}
 }

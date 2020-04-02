@@ -15,7 +15,9 @@ func TestMemoryBackend(t *testing.T) {
 		s    int
 		f    func(context.Context, time.Duration) Backend
 	}{
-		{name: "memory", s: 1, f: func(ctx context.Context, ttl time.Duration) Backend { return NewMemoryBackend(ctx, ttl) }},
+		{name: "memory", s: 1, f: func(ctx context.Context, ttl time.Duration) Backend {
+			return NewMemoryBackend(ctx, ttl, newMemoryBackendEvictioner(ctx, ttl))
+		}},
 		{name: "sharded", s: 256, f: func(ctx context.Context, ttl time.Duration) Backend {
 			return NewShardedMemoryBackend(ctx, 256, ttl, PseudoFNV64a)
 		}},
@@ -42,14 +44,14 @@ func testBackend(t *testing.T, storesInit int, f func(context.Context, time.Dura
 		wg.Add(1)
 		go func() {
 			for i := 0; i < total; i++ {
-				mb.Store(fmt.Sprintf("key-%d", i), i)
+				mb.Store(fmt.Sprintf("key-%d", i), DummyLimiter(i))
 			}
 			wg.Done()
 		}()
 	}
 	wg.Wait()
 
-	noResult := func() interface{} { return nil }
+	noResult := func() Limiter { return nil }
 
 	for i := 0; i < total; i++ {
 		v := mb.Load(fmt.Sprintf("key-%d", i), noResult)
@@ -57,10 +59,17 @@ func testBackend(t *testing.T, storesInit int, f func(context.Context, time.Dura
 			t.Errorf("key %d not present", i)
 			return
 		}
-		if res, ok := v.(int); !ok || res != i {
-			t.Errorf("unexpected value. want: %d, have: %v", i, v)
+		switch l := v.(type) {
+		case DummyLimiter:
+			if int(l) != i {
+				t.Errorf("unexpected value. want: %d, have: %v", i, v)
+				return
+			}
+		default:
+			t.Errorf("unexpected value. want: %d, have: %v", i, l)
 			return
 		}
+
 	}
 
 	<-time.After(2 * ttl)
@@ -72,3 +81,7 @@ func testBackend(t *testing.T, storesInit int, f func(context.Context, time.Dura
 		}
 	}
 }
+
+type DummyLimiter int
+
+func (d DummyLimiter) Allow() bool { return false }
