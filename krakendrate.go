@@ -228,6 +228,7 @@ func (m *memoryBackendEvictioner) manageEvictions(ctx context.Context, ttl time.
 		case <-ctx.Done():
 			return
 		case now := <-t.C:
+			m.mu.RLock()
 			for _, b := range m.backends {
 				keysToDel := []string{}
 				b.mu.RLock()
@@ -244,6 +245,7 @@ func (m *memoryBackendEvictioner) manageEvictions(ctx context.Context, ttl time.
 
 				go b.del(keysToDel...)
 			}
+			m.mu.RUnlock()
 		}
 	}
 }
