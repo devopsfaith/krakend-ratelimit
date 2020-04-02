@@ -226,6 +226,7 @@ func (m *memoryBackendEvictioner) manageEvictions(ctx context.Context, ttl time.
 	for {
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case now := <-t.C:
 			m.mu.RLock()
